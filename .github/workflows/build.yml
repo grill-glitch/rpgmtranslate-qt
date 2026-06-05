@@ -7,18 +7,16 @@ on:
   pull_request:
     branches: [main, master]
 
-# Cancel in-progress runs for the same branch
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-C target-feature=+aes,+sse2"
 
 jobs:
   # ============================================================
-  # Linux build — produces AppImage + .deb
+  # Linux build - produces .deb package
   # ============================================================
   build-linux:
     runs-on: ubuntu-24.04
@@ -28,24 +26,36 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Install Qt6
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.2"
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          modules: qtimageformats
+          cache: true
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential cmake ninja-build pkg-config \
-            qt6-base-dev qt6-base-dev-tools qt6-tools-dev \
-            qt6-tools-dev-tools qt6-wayland-dev qt6-l10n-tools \
-            qt6-svg-dev \
+            gcc-14 g++-14 ninja-build pkg-config \
             libarchive-dev libgit2-dev libnuspell-dev \
             libavutil-dev libavcodec-dev libavfilter-dev \
             libavformat-dev libswresample-dev libswscale-dev \
             libssl-dev libkrb5-dev \
+            libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev \
+            libwayland-dev \
             desktop-file-utils file
+
+      - name: Set GCC 14 as default
+        run: |
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.88
-        with:
-          components: rustfmt
 
       - name: Install cbindgen
         run: cargo install cbindgen
@@ -62,7 +72,11 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Configure
-        run: cmake -B build -S . -G Ninja
+        run: |
+          cmake -B build -S . -G Ninja \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
+            -DENABLE_LIBGIT2=OFF \
+            -DENABLE_LANGUAGETOOL=OFF
 
       - name: Build
         run: cmake --build build -j$(nproc)
@@ -70,10 +84,10 @@ jobs:
       - name: Install to staging directory
         run: cmake --install build --prefix /tmp/stage
 
-      # --- .deb package ---
       - name: Build .deb package
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${VERSION//\//-}"
           [ -z "$VERSION" ] && VERSION="0.0.0"
           PKG_DIR="/tmp/deb-pkg"
           mkdir -p "$PKG_DIR/DEBIAN"
@@ -81,11 +95,9 @@ jobs:
           mkdir -p "$PKG_DIR/usr/share/applications"
           mkdir -p "$PKG_DIR/usr/share/icons/hicolor/256x256/apps"
 
-          # Binary
           cp build/target/bin/rpgmtranslate "$PKG_DIR/usr/bin/"
 
-          # Desktop entry
-          cat > "$PKG_DIR/usr/share/applications/rpgmtranslate.desktop" << 'DESKTOP'
+          cat > "$PKG_DIR/usr/share/applications/rpgmtranslate.desktop" << 'EOF'
           [Desktop Entry]
           Name=RPGMTranslate
           Comment=Translation tool for RPG Maker games
@@ -93,20 +105,18 @@ jobs:
           Icon=rpgmtranslate
           Type=Application
           Categories=Development;Translation;
-          DESKTOP
+          EOF
 
-          # Icon
           cp icons/rpgmtranslate-logo.png \
             "$PKG_DIR/usr/share/icons/hicolor/256x256/apps/rpgmtranslate.png"
 
-          # Control file
           cat > "$PKG_DIR/DEBIAN/control" << EOF
           Package: rpgmtranslate
           Version: $VERSION
           Section: devel
           Priority: optional
           Architecture: amd64
-          Depends: libqt6core6 (>= 6.4), libqt6gui6 (>= 6.4), libqt6widgets6 (>= 6.4), libqt6svg6 (>= 6.4), libqt6network6 (>= 6.4), libarchive13, libgit2-1.7, libavcodec60, libavformat60, libavutil58, libswresample4, libswscale7, libavfilter9, libssl3, libnuspell5
+          Depends: libqt6core6 (>= 6.8), libqt6gui6 (>= 6.8), libqt6widgets6 (>= 6.8), libqt6svg6 (>= 6.8), libqt6network6 (>= 6.8), libarchive13, libavcodec60, libavformat60, libavutil58, libswresample4, libswscale7, libavfilter9, libssl3, libnuspell5
           Maintainer: grill-glitch
           Description: Translation tool for RPG Maker games
            A complete rewrite of RPGMTranslate in C++23/Qt6 with Rust backend.
@@ -114,263 +124,19 @@ jobs:
           EOF
 
           dpkg-deb --build "$PKG_DIR" "/tmp/rpgmtranslate-${VERSION}-linux-amd64.deb"
-          echo "DEB_PATH=/tmp/rpgmtranslate-${VERSION}-linux-amd64.deb" >> "$GITHUB_ENV"
 
-      # --- AppImage ---
-      - name: Build AppImage
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          [ -z "$VERSION" ] && VERSION="0.0.0"
-
-          # Install linuxdeployqt
-          wget -q "https://github.com/probonopd/linuxdeployqt/releases/download/continuous/linuxdeployqt-continuous-x86_64.AppImage" \
-            -O /tmp/linuxdeployqt
-          chmod +x /tmp/linuxdeployqt
-
-          # Prepare AppDir
-          APPDIR="/tmp/rpgmtranslate.AppDir"
-          mkdir -p "$APPDIR/usr/bin"
-          mkdir -p "$APPDIR/usr/share/applications"
-          mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
-
-          cp build/target/bin/rpgmtranslate "$APPDIR/usr/bin/"
-
-          cat > "$APPDIR/usr/share/applications/rpgmtranslate.desktop" << 'DESKTOP'
-          [Desktop Entry]
-          Name=RPGMTranslate
-          Comment=Translation tool for RPG Maker games
-          Exec=rpgmtranslate
-          Icon=rpgmtranslate
-          Type=Application
-          Categories=Development;Translation;
-          DESKTOP
-
-          cp icons/rpgmtranslate-logo.png \
-            "$APPDIR/usr/share/icons/hicolor/256x256/apps/rpgmtranslate.png"
-
-          ln -sf usr/share/applications/rpgmtranslate.desktop "$APPDIR/rpgmtranslate.desktop"
-          ln -sf usr/share/icons/hicolor/256x256/apps/rpgmtranslate.png "$APPDIR/rpgmtranslate.png"
-
-          export QMAKE=/usr/bin/qmake6
-          /tmp/linuxdeployqt \
-            "$APPDIR/usr/share/applications/rpgmtranslate.desktop" \
-            -qmake="$QMAKE" \
-            -appimage \
-            -unsupported-allow-new-glibc \
-            -extra-plugins=platforms/libqwayland-generic.so,wayland-decoration-client/libbradient.so
-
-          # Rename to predictable name
-          mv *.AppImage "/tmp/rpgmtranslate-${VERSION}-linux-amd64.AppImage"
-          echo "APPIMAGE_PATH=/tmp/rpgmtranslate-${VERSION}-linux-amd64.AppImage" >> "$GITHUB_ENV"
-
-      - name: Upload Linux artifacts
+      - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
           name: linux-build
-          path: |
-            /tmp/rpgmtranslate-*-linux-amd64.deb
-            /tmp/rpgmtranslate-*-linux-amd64.AppImage
+          path: /tmp/rpgmtranslate-*-linux-amd64.deb
           if-no-files-found: error
 
   # ============================================================
-  # Windows build — MSVC + vcpkg
-  # ============================================================
-  build-windows:
-    runs: windows-2022
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install Qt6
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: 6.8.2
-          host: windows
-          target: desktop
-          arch: win64_msvc2022_64
-          modules: qtimageformats qtsvg qttools
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.88
-
-      - name: Install cbindgen
-        run: cargo install cbindgen
-
-      - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgGitCommitId: "a7b6122f6b6504d16d96117336a0562693579933"
-
-      - name: Cache vcpkg + Rust
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.VCPKG_ROOT }}/installed
-            ${{ env.VCPKG_ROOT }}/packages
-            ~/.cargo/registry
-            ~/.cargo/git
-            rust/target
-          key: ${{ runner.os }}-vcpkg-rust-${{ hashFiles('rust/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-vcpkg-rust-
-
-      - name: Install dependencies via vcpkg
-        run: |
-          vcpkg install --triplet=x64-windows `
-            libarchive libgit2 nuspell `
-            ffmpeg[avcodec,avfilter,avformat,swresample,swscale]
-
-      - name: Configure
-        run: |
-          cmake -B build -S . -G "Visual Studio 17 2022" -A x64 `
-            -DCMAKE_TOOLCHAIN_FILE="${env:VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows `
-            -DENABLE_LANGUAGETOOL=OFF
-
-      - name: Build
-        run: cmake --build build --config Release -j${env:NUMBER_OF_PROCESSORS}
-
-      - name: Install to staging
-        run: cmake --install build --config Release --prefix /tmp/stage
-
-      - name: Collect DLLs with windeployqt
-        run: |
-          $ErrorActionPreference = "Stop"
-          $qtBin = "${env:QT_ROOT_DIR}\bin"
-          & "$qtBin\windeployqt.exe" `
-            --release `
-            --no-translations `
-            --no-compiler-runtime `
-            --dir "dist" `
-            "build\target\bin\Release\rpgmtranslate.exe"
-
-      - name: Package ZIP
-        run: |
-          $version = $env:GITHUB_REF_NAME -replace '^v',''
-          if (-not $version) { $version = "0.0.0" }
-          Compress-Archive -Path "dist\*" -DestinationPath "rpgmtranslate-${version}-windows-x64.zip" -Force
-          echo "ZIP_PATH=rpgmtranslate-${version}-windows-x64.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-build
-          path: rpgmtranslate-*-windows-x64.zip
-          if-no-files-found: error
-
-  # ============================================================
-  # macOS build — produces .dmg
-  # ============================================================
-  build-macos:
-    runs-on: macos-14
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install dependencies
-        run: |
-          brew install \
-            cmake ninja pkg-config \
-            qt@6 \
-            libarchive libgit2 nuspell ffmpeg \
-            openssl@3
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.88
-
-      - name: Install cbindgen
-        run: cargo install cbindgen
-
-      - name: Cache Rust build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            rust/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Configure
-        run: |
-          export PATH="$(brew --prefix qt@6)/bin:$PATH"
-          export OPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
-          cmake -B build -S . -G Ninja \
-            -DCMAKE_PREFIX_PATH="$(brew --prefix qt@6)" \
-            -DOPENSSL_ROOT_DIR="$OPENSSL_ROOT_DIR"
-
-      - name: Build
-        run: cmake --build build -j$(sysctl -n hw.ncpu)
-
-      - name: Deploy macOS bundle
-        run: |
-          export PATH="$(brew --prefix qt@6)/bin:$PATH"
-          VERSION="${GITHUB_REF_NAME#v}"
-          [ -z "$VERSION" ] && VERSION="0.0.0"
-
-          # Create .app bundle structure
-          APP="RPGMTranslate.app"
-          mkdir -p "$APP/Contents/MacOS"
-          mkdir -p "$APP/Contents/Resources"
-
-          cp build/target/bin/rpgmtranslate "$APP/Contents/MacOS/"
-          cp icons/rpgmtranslate-logo.png "$APP/Contents/Resources/"
-
-          cat > "$APP/Contents/Info.plist" << 'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>CFBundleName</key>
-            <string>RPGMTranslate</string>
-            <key>CFBundleIdentifier</key>
-            <string>com.rpgmtranslate.app</string>
-            <key>CFBundleVersion</key>
-            <string>VERSION_PLACEHOLDER</string>
-            <key>CFBundleExecutable</key>
-            <string>rpgmtranslate</string>
-            <key>CFBundleIconFile</key>
-            <string>rpgmtranslate-logo</string>
-            <key>CFBundlePackageType</key>
-            <string>APPL</string>
-            <key>LSMinimumSystemVersion</key>
-            <string>13.0</string>
-            <key>NSHighResolutionCapable</key>
-            <true/>
-          </dict>
-          </plist>
-          PLIST
-          sed -i '' "s/VERSION_PLACEHOLDER/$VERSION/g" "$APP/Contents/Info.plist"
-
-          # Deploy Qt frameworks
-          macdeployqt "$APP" -always-overwrite
-
-          # Create DMG
-          hdiutil create -volname "RPGMTranslate" \
-            -srcfolder "$APP" \
-            -ov -format UDZO \
-            "/tmp/rpgmtranslate-${VERSION}-macos-arm64.dmg"
-
-          echo "DMG_PATH=/tmp/rpgmtranslate-${VERSION}-macos-arm64.dmg" >> "$GITHUB_ENV"
-
-      - name: Upload macOS artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-build
-          path: /tmp/rpgmtranslate-*-macos-arm64.dmg
-          if-no-files-found: error
-
-  # ============================================================
-  # Release — triggered on tag push
+  # Release - triggered on tag push
   # ============================================================
   release:
-    needs: [build-linux, build-windows, build-macos]
+    needs: [build-linux]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
