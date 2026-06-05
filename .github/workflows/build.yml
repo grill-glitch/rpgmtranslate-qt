@@ -40,7 +40,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            gcc-14 g++-14 ninja-build pkg-config \
+            gcc-14 g++-14 clang \
+            cmake ninja-build pkg-config \
+            qt6-l10n-tools \
             libarchive-dev libgit2-dev libnuspell-dev \
             libavutil-dev libavcodec-dev libavfilter-dev \
             libavformat-dev libswresample-dev libswscale-dev \
