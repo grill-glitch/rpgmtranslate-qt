@@ -135,10 +135,99 @@ jobs:
           if-no-files-found: error
 
   # ============================================================
+  # Windows build - MSVC + vcpkg
+  # Based on: https://rpg-maker-translation-tools.github.io/rpgmtranslate-qt/development/
+  # ============================================================
+  build-windows:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Qt6
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.2"
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: qtimageformats
+          cache: true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.88
+
+      - name: Install cbindgen
+        run: cargo install cbindgen
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: "a7b6122f6b6504d16d96117336a0562693579933"
+
+      - name: Cache vcpkg + Rust
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.VCPKG_ROOT }}/installed
+            ${{ env.VCPKG_ROOT }}/packages
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-vcpkg-rust-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-vcpkg-rust-
+
+      - name: Install dependencies via vcpkg
+        run: |
+          vcpkg install --triplet=x64-windows-static-md `
+            libarchive libgit2 nuspell `
+            ffmpeg[avcodec,avfilter,avformat,swresample,swscale]
+
+      - name: Configure
+        run: |
+          cmake -B build -S . -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static-md `
+            -DENABLE_LANGUAGETOOL=OFF `
+            -DENABLE_LIBGIT2=OFF
+
+      - name: Build
+        run: cmake --build build --config Release -j$env:NUMBER_OF_PROCESSORS
+
+      - name: Collect DLLs with windeployqt
+        run: |
+          $qtBin = "$env:QT_ROOT_DIR\bin"
+          & "$qtBin\windeployqt.exe" `
+            --release `
+            --no-translations `
+            --no-compiler-runtime `
+            --dir "dist" `
+            "build\target\bin\Release\rpgmtranslate.exe"
+
+      - name: Package ZIP
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v',''
+          if (-not $version) { $version = "0.0.0" }
+          Compress-Archive -Path "dist\*" -DestinationPath "rpgmtranslate-${version}-windows-x64.zip" -Force
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: rpgmtranslate-*-windows-x64.zip
+          if-no-files-found: error
+
+  # ============================================================
   # Release - triggered on tag push
   # ============================================================
   release:
-    needs: [build-linux]
+    needs: [build-linux, build-windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
