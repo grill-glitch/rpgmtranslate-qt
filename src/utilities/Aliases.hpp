@@ -14,7 +14,6 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <qtversionchecks.h>
 #include <ranges>
 #include <string>
 #include <vector>

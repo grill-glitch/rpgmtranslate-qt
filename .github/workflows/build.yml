@@ -1,0 +1,235 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Qt6
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.2"
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          modules: qtimageformats
+          cache: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-14 g++-14 clang \
+            cmake ninja-build pkg-config \
+            qt6-l10n-tools \
+            libarchive-dev libgit2-dev libnuspell-dev \
+            libavutil-dev libavcodec-dev libavfilter-dev \
+            libavformat-dev libswresample-dev libswscale-dev \
+            libssl-dev libkrb5-dev \
+            libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev \
+            libwayland-dev \
+            desktop-file-utils file
+
+      - name: Set GCC 14 as default
+        run: |
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.88
+
+      - name: Install cbindgen
+        run: cargo install cbindgen
+
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Configure
+        run: |
+          cmake -B build -S . -G Ninja \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
+            -DENABLE_LIBGIT2=OFF \
+            -DENABLE_LANGUAGETOOL=OFF
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Install to staging directory
+        run: cmake --install build --prefix /tmp/stage
+
+      - name: Build .deb package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${VERSION//\//-}"
+          [ -z "$VERSION" ] && VERSION="0.0.0"
+          PKG_DIR="/tmp/deb-pkg"
+          mkdir -p "$PKG_DIR/DEBIAN"
+          mkdir -p "$PKG_DIR/usr/bin"
+          mkdir -p "$PKG_DIR/usr/share/applications"
+          mkdir -p "$PKG_DIR/usr/share/icons/hicolor/256x256/apps"
+          cp build/target/bin/rpgmtranslate "$PKG_DIR/usr/bin/"
+          cat > "$PKG_DIR/usr/share/applications/rpgmtranslate.desktop" << 'EOF'
+          [Desktop Entry]
+          Name=RPGMTranslate
+          Comment=Translation tool for RPG Maker games
+          Exec=rpgmtranslate
+          Icon=rpgmtranslate
+          Type=Application
+          Categories=Development;Translation;
+          EOF
+          cp icons/rpgmtranslate-logo.png "$PKG_DIR/usr/share/icons/hicolor/256x256/apps/rpgmtranslate.png"
+          cat > "$PKG_DIR/DEBIAN/control" << EOF
+          Package: rpgmtranslate
+          Version: $VERSION
+          Section: devel
+          Priority: optional
+          Architecture: amd64
+          Depends: libqt6core6 (>= 6.8), libqt6gui6 (>= 6.8), libqt6widgets6 (>= 6.8), libqt6svg6 (>= 6.8), libqt6network6 (>= 6.8), libarchive13, libavcodec60, libavformat60, libavutil58, libswresample4, libswscale7, libavfilter9, libssl3, libnuspell5
+          Maintainer: grill-glitch
+          Description: Translation tool for RPG Maker games
+           A complete rewrite of RPGMTranslate in C++23/Qt6 with Rust backend.
+           Supports RPG Maker XP/VX/VXAce/MV/MZ with automated archive decryption.
+          EOF
+          dpkg-deb --build "$PKG_DIR" "/tmp/rpgmtranslate-${VERSION}-linux-amd64.deb"
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-build
+          path: /tmp/rpgmtranslate-*-linux-amd64.deb
+          if-no-files-found: error
+
+  build-windows:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Qt6
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.2"
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: qtimageformats
+          cache: true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.88
+
+      - name: Install cbindgen
+        run: cargo install cbindgen
+
+      - name: Setup vcpkg
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git $env:VCPKG_ROOT
+          cd $env:VCPKG_ROOT
+          .\bootstrap-vcpkg.bat
+        env:
+          VCPKG_ROOT: D:\vcpkg
+
+      - name: Cache vcpkg + Rust
+        uses: actions/cache@v4
+        with:
+          path: |
+            D:\vcpkg\installed
+            D:\vcpkg\packages
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-vcpkg-rust-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-vcpkg-rust-
+
+      - name: Install dependencies via vcpkg
+        run: |
+          D:\vcpkg\vcpkg install --triplet=x64-windows-static-md `
+            libarchive libgit2 nuspell `
+            ffmpeg[avcodec,avfilter,avformat,swresample,swscale]
+
+      - name: Configure
+        run: |
+          cmake -B build -S . -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="D:/vcpkg/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static-md `
+            -DENABLE_LANGUAGETOOL=OFF `
+            -DENABLE_LIBGIT2=OFF
+
+      - name: Build
+        run: cmake --build build --config Release -j$env:NUMBER_OF_PROCESSORS
+
+      - name: Collect DLLs with windeployqt
+        run: |
+          $qtBin = "$env:QT_ROOT_DIR\bin"
+          & "$qtBin\windeployqt.exe" `
+            --release `
+            --no-translations `
+            --no-compiler-runtime `
+            --dir "dist" `
+            "build\target\bin\Release\rpgmtranslate.exe"
+
+      - name: Package ZIP
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v',''
+          if (-not $version) { $version = "0.0.0" }
+          Compress-Archive -Path "dist\*" -DestinationPath "rpgmtranslate-${version}-windows-x64.zip" -Force
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: rpgmtranslate-*-windows-x64.zip
+          if-no-files-found: error
+
+  release:
+    needs: [build-linux, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
