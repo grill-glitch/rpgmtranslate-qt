@@ -91,6 +91,38 @@ using QSVList = QList<QStringView>;
 using QUtf8SV = QUtf8StringView;
 using QL1SV = QLatin1StringView;
 
+// Translation endpoint types (missing from cbindgen export)
+enum class TranslationEndpoint : int {
+    Google = 0,
+    Yandex = 1,
+    DeepL = 2,
+    OpenAI = 3,
+    Anthropic = 4,
+    Gemini = 5,
+    Ollama = 6
+};
+
+// Engine types (missing from cbindgen export)
+enum class EngineType : int {
+    Google = 0,
+    Yandex = 1,
+    DeepL = 2,
+    OpenAI = 3,
+    Anthropic = 4,
+    Gemini = 5,
+    Ollama = 6
+};
+
+// Duplicate mode (missing from cbindgen export)
+enum class DuplicateMode : int {
+    None = 0,
+    Copy = 1,
+    Skip = 2
+};
+
+// Base flags (missing from cbindgen export)
+using BaseFlags = uint32_t;
+
 template <typename T, typename E>
 using result = std::expected<T, E>;
 template <typename E>
